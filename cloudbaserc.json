@@ -1,0 +1,8 @@
+{
+  "version": "2.0",
+  "envId": "temu-tools-prod-3g8yeywsda972fae",
+  "$schema": "https://framework-1258016615.tcloudbaseapp.com/schema/latest.json",
+  "cloudrun": {
+    "name": "zsxq-scan"
+  }
+}

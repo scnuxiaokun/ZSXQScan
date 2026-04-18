@@ -1,0 +1,1 @@
+{"name": "login", "version": "1.0.0", "description": "Cookie管理 — 设置/读取/验证", "main": "index.js", "dependencies": {"@cloudbase/node-sdk": "^2.6.0"}, "engines": {"node": ">=16.0.0"}}

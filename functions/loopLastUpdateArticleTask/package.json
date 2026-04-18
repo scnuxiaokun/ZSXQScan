@@ -1,0 +1,1 @@
+{"name": "loopLastUpdateArticleTask", "version": "1.0.0", "description": "文章拉取任务循环 — 消费pending任务获取全文", "main": "index.js", "dependencies": {"@cloudbase/node-sdk": "^2.6.0"}, "engines": {"node": ">=16.0.0"}}

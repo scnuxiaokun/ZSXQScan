@@ -1,308 +1,345 @@
 /**
- * 监控星球更新 - 云函数入口
- * 
- * 功能：
- * 1. 新建无上下文的web容器（浏览器实例）
- * 2. 拉取星球URL对应的页面内容
- * 3. 解析"最近更新时间"
- * 4. 如果是"刚刚"则创建拉取任务
- * 5. 定时循环执行
+ * 监控星球更新 - 纯 API 版
+ *
+ * 使用 pub-api.zsxq.com 公开接口检测更新:
+ *  - 无需 Cookie、无需签名、无需任何认证
+ *  - 付费星球/免费星球均可访问
+ *  - 返回精确到毫秒的 topicCreateTime（最新话题时间戳）
+ *  - 封号风险: 零（跟你的登录账号完全无关）
+ *
+ * 架构:
+ *   Monitor (pub-api, 无认证) → 检测到新帖(topicCreateTime 变化)
+ *     → GetArticle (api.zsxq.com, 带Cookie) → 获取全文
+ *
+ * 去重逻辑:
+ *   通过 topicCreateTime 去重 — 只要任务表中不存在该时间戳的任务就创建，
+ *   无论任务状态是 pending/completed/failed
  */
 
-const cloud = require('@cloudbase/node-sdk');
+const {
+  getGroupPublicInfo,   // 公开接口（无认证）
+  resolveGroupId,
+  formatRelativeTime,
+} = require('../zsxqApi');
 
-// 初始化云开发SDK
-const app = cloud.init({
-  env: process.env.TCB_ENV || process.env.SCF_ENV_NAME,
-});
+// MySQL 数据库连接
+const mysql = require('mysql2/promise');
 
-const db = app.database();
-const tasksCollection = db.collection('tasks');
-const configCollection = db.collection('config');
-
-// 默认监控间隔：1分钟
-const DEFAULT_INTERVAL_MS = 60 * 1000;
+let dbConnection;
 
 /**
- * 从URL中提取星球ID
- * @param {string} url 星球URL
- * @returns {string} 星球ID
+ * 初始化 MySQL 数据库连接
  */
-function extractPlanetId(url) {
-  // URL最后一段是星球ID
-  const parts = url.replace(/\/+$/, '').split('/');
-  return parts[parts.length - 1] || url;
+async function initDB() {
+  if (!dbConnection) {
+    const dbConfig = {
+      host: process.env.MYSQL_HOST || 'sh-cynosdbmysql-grp-5aqhxbwa.sql.tencentcdb.com',
+      port: parseInt(process.env.MYSQL_PORT) || 22871,
+      user: process.env.MYSQL_USER || 'zsxq_scan_dbuser',
+      password: process.env.MYSQL_PASSWORD || 'zsxq@123',
+      database: process.env.MYSQL_DATABASE || 'temu-tools-prod-3g8yeywsda972fae',
+    };
+    
+    console.log('[Monitor] 正在连接 MySQL 数据库...');
+    dbConnection = await mysql.createConnection(dbConfig);
+    console.log('[Monitor] ✅ MySQL 数据库连接成功');
+  }
+  return dbConnection;
 }
 
 /**
- * 检查是否存在未完成的任务
- * @param {string} planetId 星球ID
- * @returns {Promise<boolean>} 是否有待处理任务
+ * 关闭数据库连接
  */
-async function hasPendingTask(planetId) {
+async function closeDB() {
+  if (dbConnection) {
+    await dbConnection.end();
+    console.log('[Monitor] 🔒 MySQL 连接已关闭');
+    dbConnection = null;
+  }
+}
+
+// ==================== 辅助函数 ====================
+
+/**
+ * 检查该星球是否已存在相同 topicCreateTime 的任务
+ * 
+ * 去重逻辑（v2.2）:
+ *   - 不只看 pending 状态，而是看 topicCreateTime 是否已存在
+ *   - 无论任务是 pending/completed/failed，只要 topicCreateTime 一致
+ *     说明星球最新帖子没变 → 不需要创建新任务
+ * 
+ * @param {string} groupId 星球ID
+ * @param {string} topicCreateTime 最新话题的创建时间戳（ISO格式字符串）
+ * @returns {Promise<boolean>} true = 已存在该时间的任务，无需创建
+ */
+async function hasTaskWithSameTopicTime(groupId, topicCreateTime) {
+  if (!topicCreateTime) return false;
+
   try {
-    const result = await tasksCollection
-      .where({
-        planetId: planetId,
-        status: 'pending',
-      })
-      .count();
-    
-    return result.total > 0;
+    const conn = await initDB();
+    const [rows] = await conn.query(
+      'SELECT COUNT(*) as count FROM `tasks` WHERE `planetId` = ? AND `topicCreateTime` = ?',
+      [groupId, topicCreateTime]
+    );
+
+    const exists = rows[0].count > 0;
+    if (exists) {
+      console.log(`[Monitor] [${groupId}] topicCreateTime=${topicCreateTime} 的任务已存在(共${rows[0].count}条)，跳过`);
+    }
+    return exists;
   } catch (error) {
-    console.error(`[Monitor] 查询待处理任务失败 [${planetId}]:`, error.message);
+    console.error(`[Monitor] 查询历史任务失败 [${groupId}]:`, error.message);
     return false;
   }
 }
 
 /**
- * 解析页面的"最近更新时间"
+ * 创建文章拉取任务到数据库
  * 
- * @param {import('puppeteer-core').Page} page 页面实例
- * @returns {Promise<{timeText: string, planetName: string}>}
- */
-async function parseUpdateTime(page) {
-  return await page.evaluate(() => {
-    // 知识星球页面中"最近更新时间"的选择器
-    const timeSelectors = [
-      // 常见的时间显示元素
-      '[class*="update"] [class*="time"]',
-      '[class*="last"] [class*="time"]',
-      '.update-time, .last-update-time',
-      // 包含"更新"文字附近的元素
-      '*',
-    ];
-    
-    let timeText = '';
-    
-    // 方法1：通过特定选择器查找
-    for (const selector of timeSelectors.slice(0, -1)) {
-      const el = document.querySelector(selector);
-      if (el) {
-        timeText = el.innerText.trim();
-        break;
-      }
-    }
-    
-    // 方法2：通过文本内容匹配（更通用）
-    if (!timeText) {
-      const allElements = document.querySelectorAll('*');
-      for (const el of allElements) {
-        const text = el.innerText?.trim() || '';
-        // 匹配常见的时间描述格式
-        if (/^(刚刚|\d+分钟前|\d+小时前|昨天|前天|\d+天前)$/.test(text)) {
-          timeText = text;
-          break;
-        }
-        // 匹配包含"更新"和时间在一起的文本
-        if (text.includes('更新') && /(\d+分钟前|\d+小时前|刚刚)/.test(text)) {
-          const match = text.match(/(刚刚|\d+分钟前|\d+小时前)/);
-          if (match) {
-            timeText = match[1];
-            break;
-          }
-        }
-      }
-    }
-    
-    // 获取星球名称
-    let planetName = '';
-    const nameSelectors = ['h1', '[class*="name"]', '[class*="title"]', '.planet-name'];
-    for (const selector of nameSelectors) {
-      const el = document.querySelector(selector);
-      if (el && el.innerText.trim()) {
-        planetName = el.innerText.trim();
-        break;
-      }
-    }
-    
-    return { timeText, planetName };
-  });
-}
-
-/**
- * 创建文章拉取任务
- * 
- * @param {Object} taskData 任务数据
+ * topicCreateTime 使用 API 原始返回值（ISO 8601 字符串），
+ * 作为去重键：同一时间戳 = 同一篇最新帖子，不重复创建
  */
 async function createTask(taskData) {
   try {
+    const conn = await initDB();
     const now = new Date();
-    await tasksCollection.add({
-      data: {
-        planetId: taskData.planetId,
-        planetName: taskData.planetName,
-        planetUrl: taskData.planetUrl,
-        status: 'pending',           // 未开始
-        lastUpdateTime: taskData.lastUpdateTime,
-        article: '',                 // 拉取完成后填充
-        createdAt: now,
-        updatedAt: now,
-      },
-    });
-    console.log(`[Monitor] 创建任务成功 [${taskData.planetId}]`);
+    
+    // 生成唯一ID
+    const taskId = `mo${Date.now().toString(36)}${Math.random().toString(36).substr(2, 9)}`;
+    
+    await conn.query(
+      'INSERT INTO `tasks` (`id`, `planetId`, `planetName`, `planetUrl`, `status`, `lastUpdateTime`, `topicCreateTime`, `article`, `createdAt`, `updatedAt`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [
+        taskId,
+        taskData.groupId,
+        taskData.planetName || `星球${taskData.groupId}`,
+        taskData.planetUrl || '',
+        'pending',
+        taskData.relativeTime,
+        taskData.createTime || null,
+        '',
+        now,
+        now,
+      ]
+    );
+    
+    console.log(`[Monitor] 创建任务成功 [${taskData.groupId}] id=${taskId} topicCreateTime=${taskData.createTime}`);
   } catch (error) {
-    console.error(`[Monitor] 创建任务失败 [${taskData.planetId}]:`, error.message);
+    console.error(`[Monitor] 创建任务失败 [${taskData.groupId}]:`, error.message);
   }
 }
 
 /**
- * 获取监控配置
- * @returns {Promise<{interval: number, urls: string[]}>}
+ * 从数据库读取监控配置
  */
 async function getMonitorConfig() {
   try {
-    // 获取监控间隔
-    const intervalDoc = await configCollection.doc('monitorInterval').get();
-    const interval = intervalDoc.data?.value || DEFAULT_INTERVAL_MS;
+    const conn = await initDB();
+    const [rows] = await conn.query(
+      'SELECT `value` FROM `config` WHERE `id` = ? LIMIT 1',
+      ['monitorUrls']
+    );
     
-    // 获取监控URL列表
-    const urlsDoc = await configCollection.doc('monitorUrls').get();
-    const urls = urlsDoc.data?.value || [];
+    if (rows.length === 0) {
+      return { urls: [] };
+    }
     
-    return { interval, urls };
+    let value = rows[0].value;
+    // 尝试解析 JSON
+    try {
+      value = JSON.parse(value);
+      // 如果解析后是对象且有 value 字段，取 value
+      if (typeof value === 'object' && value !== null && value.value !== undefined) {
+        value = value.value;
+      }
+    } catch (e) {
+      // 不是 JSON，直接返回字符串
+    }
+    
+    return { urls: Array.isArray(value) ? value : [] };
   } catch (error) {
     console.error('[Monitor] 获取配置失败，使用默认值:', error.message);
-    return { interval: DEFAULT_INTERVAL_MS, urls: [] };
+    return { urls: [] };
   }
 }
 
+// ==================== 核心：监控单个星球 ====================
+
 /**
- * 监控单个星球
+ * 监控单个星球 — 使用公开接口，零认证零风险
  * 
- * @param {import('puppeteer-core').Browser} browser 浏览器实例（无登录状态）
- * @param {string} url 星球URL
- * @returns {Promise<boolean>} 是否有更新
+ * @param {string} planetUrl 星球URL或ID (如 "https://wx.zsxq.com/group/48418518458448" 或 "48418518458448")
+ * @returns {Promise<Object>} 监控结果
  */
-async function monitorPlanet(browser, url) {
-  const planetId = extractPlanetId(url);
-  console.log(`[Monitor] 开始监控星球 [${planetId}] ${url}`);
-  
-  let page;
+async function monitorPlanet(planetUrl) {
+  const groupId = resolveGroupId(planetUrl);
+
+  console.log(`[Monitor] 开始监控 [${groupId}] ${planetUrl} 🔓(公开接口)`);
+
   try {
-    page = await browser.newPage();
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
-    await sleep(2000); // 等待动态内容加载
-    
-    // 检查是否有未完成的任务
-    const hasPending = await hasPendingTask(planetId);
-    if (hasPending) {
-      console.log(`[Monitor] [${planetId}] 存在未完成任务，跳过本轮监控`);
-      return false;
+    // 步骤1：调用公开接口获取星球信息（🔑 核心！无需任何认证）
+    const publicInfo = await getGroupPublicInfo(groupId);
+
+    // 步骤2：解析返回数据
+    if (!publicInfo.resp_data || !publicInfo.resp_data.group) {
+      console.warn(`[Monitor] [${groupId}] 公开接口返回数据异常`);
+      return { groupId, url: planetUrl, hasUpdate: false, reason: 'invalid_response' };
     }
-    
-    // 解析最近更新时间
-    const { timeText, planetName } = await parseUpdateTime(page);
-    console.log(`[Monitor] [${planetId}] 最近更新时间: "${timeText}", 名称: "${planetName}"`);
-    
-    if (!timeText) {
-      console.warn(`[Monitor] [${planetId}] 未能获取到更新时间`);
-      return false;
+
+    const group = publicInfo.resp_data.group;
+    const planetName = group.name;
+    const topicCreateTime = group.latest_topic_create_time;
+
+    if (!topicCreateTime) {
+      console.warn(`[Monitor] [${groupId}] 未返回 topicCreateTime`);
+      return { groupId, url: planetUrl, hasUpdate: false, reason: 'no_time_data' };
     }
-    
-    // 判断是否为"刚刚"
-    if (timeText === '刚刚') {
-      console.log(`[Monitor] ✅ [${planetId}] 发现更新！创建拉取任务...`);
-      
-      // 创建拉取任务
-      await createTask({
-        planetId,
-        planetName: planetName || `星球${planetId}`,
-        planetUrl: url,
-        lastUpdateTime: timeText,
-      });
-      
-      return true; // 有更新
-    } else {
-      console.log(`[Monitor] [${planetId}] 更新时间为"${timeText}"，无新更新`);
-      return false;
+
+    // 步骤3：去重检查 — 查找该 topicCreateTime 是否已有任务
+    // 无论任务状态是 pending/completed/failed，只要时间戳一致就说明是同一篇帖子
+    const alreadyHasTask = await hasTaskWithSameTopicTime(groupId, topicCreateTime);
+    if (alreadyHasTask) {
+      return { 
+        groupId, url: planetUrl, hasUpdate: false, skipped: true, 
+        reason: 'same_topic_time_exists',
+        topicCreateTime,
+      };
     }
-    
+
+    // 步骤4：记录日志并创建拉取任务
+    const relativeTime = formatRelativeTime(topicCreateTime);
+
+    console.log(
+      `[Monitor] [${groupId}] ${planetName} | ` +
+      `最新更新: ${relativeTime} (${topicCreateTime}) | ` +
+      `新帖 ✅`
+    );
+
+    console.log(`[Monitor] ✅ [${groupId}] ${planetName} 发现新帖！创建拉取任务...`);
+
+    createTask({
+      groupId,
+      planetName,
+      planetUrl,
+      relativeTime,
+      createTime: topicCreateTime,
+    });
+
+    return {
+      groupId,
+      url: planetUrl,
+      planetName,
+      hasUpdate: true,
+      relativeTime,
+      createTime: topicCreateTime,
+      // 额外信息（公开接口免费送的）
+      memberCount: group.statistics?.members?.count,
+      topicCount: group.statistics?.topics?.topics_count,
+      groupType: group.type,
+    };
+
   } catch (error) {
-    console.error(`[Monitor] [${planetId}] 监控出错:`, error.message);
-    if (page) {
-      await page.screenshot({ path: `/tmp/monitor_${planetId}_error.png` }).catch(() => {});
+    // 公开接口出错时的处理
+    console.error(`[Monitor] [${groupId}] 监控出错:`, error.message);
+
+    // 区分不同类型的错误
+    if (error.message.includes('401') || error.message.includes('403')) {
+      return {
+        groupId, url: planetUrl, hasUpdate: false,
+        error: 'auth_required', errorMsg: '公开接口需要认证（不应该发生）',
+      };
     }
-    return false;
-  } finally {
-    if (page) {
-      await page.close().catch(() => {});
+
+    if (error.message.includes('404') || error.message.includes('not found')) {
+      return {
+        groupId, url: planetUrl, hasUpdate: false,
+        error: 'group_not_found', errorMsg: '星球不存在或ID错误',
+      };
     }
+
+    if (error.message.includes('timeout') || error.message.includes('network')) {
+      return {
+        groupId, url: planetUrl, hasUpdate: false,
+        error: 'network', errorMsg: error.message,
+      };
+    }
+
+    return {
+      groupId, url: planetUrl, hasUpdate: false,
+      error: 'unknown', errorMsg: error.message,
+    };
   }
 }
 
-/**
- * 云函数主入口
- * 
- * 支持两种调用方式：
- * 1. 定时触发器触发 - 自动监控所有配置的星球URL
- * 2. 手动调用 - 可传入参数指定监控某个星球
- */
+// ==================== 云函数入口 ====================
+
 exports.main = async (event, context) => {
+  const startTime = Date.now();
   console.log('[Monitor] ===== 开始一轮监控 =====');
   console.log('[Monitor] Event:', JSON.stringify(event));
-  
-  // 动态导入puppeteer-core（云函数环境需要）
-  let puppeteer;
+
   try {
-    puppeteer = require('puppeteer-core');
-  } catch (e) {
-    console.error('[Monitor] puppeteer-core 未安装，请先安装依赖');
-    return { code: -1, message: '缺少依赖' };
-  }
-  
-  // 获取浏览器连接配置
-  const browserEndpoint = process.env.BROWSER_ENDPOINT || process.env.CDP_ENDPOINT;
-  if (!browserEndpoint) {
-    console.error('[Monitor] 未配置浏览器端点 (BROWSER_ENDPOINT/CDP_ENDPOINT)');
-    return { code: -1, message: '未配置浏览器端点' };
-  }
-  
-  let browser;
-  try {
-    // 连接到已运行的浏览器实例（无登录状态的新容器）
-    browser = await puppeteer.connect({
-      browserWSEndpoint: browserEndpoint,
-      defaultViewport: { width: 375, height: 812 }, // 移动端视口
-    });
-    
-    // 获取要监控的URL列表
+    // 初始化数据库连接
+    await initDB();
+
+    // 获取监控列表
     let monitorUrls;
-    
+
     if (event && event.planetUrl) {
-      // 手动指定了星球URL
+      // 单个星球手动触发
       monitorUrls = [event.planetUrl];
     } else {
-      // 从数据库配置中读取
+      // 定时触发：从数据库读配置
       const config = await getMonitorConfig();
       monitorUrls = config.urls;
-      
+
       if (monitorUrls.length === 0) {
-        console.warn('[Monitor] 没有配置监控URL，请在config集合中添加monitorUrls配置');
-        return { code: 0, message: '没有需要监控的星球', data: [] };
+        console.warn('[Monitor] ⚠️ 没有配置监控URL');
+        return { code: 0, message: '没有需要监控的星球', data: [], mode: 'pub-api' };
       }
     }
-    
-    // 逐个监控
+
+    console.log(`[Monitor] 📋 监控 ${monitorUrls.length} 个星球 (pub-api · 无认证 · 零风险)`);
+
+    // 逐个监控（串行执行，避免并发过高）
     const results = [];
-    for (const url of monitorUrls) {
-      const hasUpdate = await monitorPlanet(browser, url);
-      results.push({ url, hasUpdate });
+    for (let i = 0; i < monitorUrls.length; i++) {
+      const url = monitorUrls[i];
+      const result = await monitorPlanet(url);
+      results.push(result);
+
+      // 星球间加个小延迟，避免请求过于密集（虽然公开接口不需要，但保持礼貌）
+      if (i < monitorUrls.length - 1) {
+        await sleep(200 + Math.random() * 300);
+      }
     }
-    
-    console.log('[Monitor] ===== 本轮监控结束 =====');
+
+    // 最终统计
+    const updateCount = results.filter(r => r.hasUpdate).length;
+    const skipCount = results.filter(r => r.skipped).length;
+    const errorCount = results.filter(r => r.error).length;
+    const elapsed = Date.now() - startTime;
+
+    console.log(
+      `[Monitor] ===== 本轮完成 (${elapsed}ms): ` +
+      `✅${updateCount}更新 | ⏭️${skipCount}跳过 | ❌${errorCount}错误 =====`
+    );
+
     return {
       code: 0,
       message: '监控完成',
+      mode: 'pub-api',           // 使用公开接口
+      authRequired: false,       // 不需要任何认证
+      elapsedMs: elapsed,
       data: results,
     };
-    
+
   } catch (error) {
     console.error('[Monitor] 执行出错:', error);
     return { code: -1, message: error.message };
   } finally {
-    // 注意：不要断开浏览器连接，因为这是共享实例
-    // 如果是独立启动的浏览器才需要关闭
+    // 关闭数据库连接
+    await closeDB();
   }
 };
 

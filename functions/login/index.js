@@ -1,193 +1,108 @@
 /**
- * 登录模块 - 手机号验证码登录知识星球
+ * 登录模块 - Cookie 管理工具 (v2.2)
  * 
- * 使用 Puppeteer 实现浏览器自动化登录
+ * 职责: Cookie 的获取、存储、验证与分发
+ * 
+ * v2.2 变更: 移除 Puppeteer autoLogin 流程（v1遗留，已废弃）
+ * 仅保留手动设置 Cookie 的方式——简单、稳定、零依赖
+ * 
+ * 使用方式:
+ *   1. 从浏览器复制 Cookie（F12 → Network → 复制 Cookie 头）
+ *   2. 调用 { action: "setCookie", cookie: "zsxq_access_token=xxx; ..." }
+ *   3. GetArticle / LoopTask 模块自动读取并使用
  */
 
-const LOGIN_URL = 'https://wx.zsxq.com/login';
-const PHONE_NUMBER = '18948788411';
+const { saveCookie, getValidCookie, checkCookieStatus } = require('../cookieManager');
+const { validateCookie } = require('../zsxqApi');
 
-// 验证码获取相关配置（通过双卡助手转发）
-const SMS_CONFIG = {
-  // 双卡助手转发的验证码获取接口地址
-  // 具体地址需要根据实际双卡助手的配置来填写
-  endpoint: process.env.SMS_ENDPOINT || '',
+// ==================== 手动设置 Cookie（唯一方式） ====================
+
+/**
+ * 手动设置 Cookie 到云数据库
+ * 
+ * 如何获取 Cookie:
+ *   1. 浏览器打开 https://wx.zsxq.com/ 并登录
+ *   2. F12 → Network 面板 → 刷新页面
+ *   3. 找到任意 api.zsxq.com 请求 → 复制 Request Headers 中的 Cookie
+ *   4. 调用本接口保存
+ * 
+ * @param {string} cookie 完整的 Cookie 字符串（含 zsxq_access_token）
+ */
+async function setCookie(cookie) {
+  if (!cookie || typeof cookie !== 'string' || cookie.length < 10) {
+    throw new Error('无效的 Cookie 值');
+  }
+
+  const valid = await validateCookie(cookie);
+  if (!valid) {
+    throw new Error(
+      'Cookie 验证失败！请检查:\n' +
+      '1. 是否复制了完整的 Cookie（包含 zsxq_access_token）\n' +
+      '2. Cookie 是否已过期\n' +
+      '3. 是否正确登录了知识星球'
+    );
+  }
+
+  await saveCookie(cookie, { source: 'manual' });
+
+  return {
+    success: true,
+    message: '✅ Cookie 已保存并验证通过',
+    hint: 'Cookie 有效期通常为 1-3 个月，过期后需重新获取',
+  };
+}
+
+// ==================== 读取与检测 ====================
+
+/** 获取当前有效的 Cookie（供其他模块调用） */
+async function getCookie() {
+  return getValidCookie(true);
+}
+
+/** 检查当前 Cookie 状态 */
+async function checkStatus() {
+  return checkCookieStatus();
+}
+
+// ==================== 云函数主入口 ====================
+
+exports.main = async (event, context) => {
+  console.log('[Login] Action:', event?.action || 'getCookie');
+
+  switch (event?.action) {
+
+    case 'setCookie':
+      if (!event.cookie) {
+        return { code: -1, message: '缺少 cookie 参数' };
+      }
+      try {
+        const result = await setCookie(event.cookie);
+        return { code: 0, ...result };
+      } catch (e) {
+        return { code: -1, message: e.message };
+      }
+
+    case 'checkStatus':
+      try {
+        const status = await checkStatus();
+        return { code: 0, data: status };
+      } catch (e) {
+        return { code: -1, message: e.message };
+      }
+
+    case 'getCookie':
+    default:
+      try {
+        const cookie = await getCookie();
+        return {
+          code: 0,
+          message: 'Cookie 有效',
+          preview: cookie.substring(0, 30) + '...',
+        };
+      } catch (e) {
+        return { code: -1, message: e.message, needRelogin: true };
+      }
+  }
 };
 
-/**
- * 执行登录流程
- * @param {import('puppeteer-core').Browser} browser Puppeteer 浏览器实例
- * @returns {Promise<import('puppeteer-core').Page>} 登录后的页面实例
- */
-async function login(browser) {
-  const page = await browser.newPage();
-  
-  try {
-    console.log('[Login] 开始登录流程，打开登录页面...');
-    await page.goto(LOGIN_URL, { waitUntil: 'networkidle2', timeout: 30000 });
-    
-    // 点击"切换至手机号登录"
-    console.log('[Login] 切换至手机号登录...');
-    await page.waitForSelector('text=切换至手机号登录', { timeout: 10000 });
-    await page.click('text=切换至手机号登录');
-    await sleep(1000);
-    
-    // 输入手机号
-    console.log('[Login] 输入手机号:', PHONE_NUMBER);
-    const phoneInput = await page.waitForSelector('input[placeholder*="手机号"]', { timeout: 5000 });
-    if (phoneInput) {
-      await phoneInput.click({ clickCount: 3 });
-      await phoneInput.type(PHONE_NUMBER, { delay: 50 });
-    } else {
-      // 备选：查找所有input
-      const inputs = await page.$$('input');
-      for (const input of inputs) {
-        const placeholder = await input.evaluate(el => el.placeholder);
-        if (placeholder && (placeholder.includes('手机') || placeholder.includes('phone'))) {
-          await input.click({ clickCount: 3 });
-          await input.type(PHONE_NUMBER, { delay: 50 });
-          break;
-        }
-      }
-    }
-    await sleep(500);
-    
-    // 点击"获取验证码"
-    console.log('[Login] 点击获取验证码...');
-    const smsButton = await page.waitForSelector('text=获取验证码', { timeout: 5000 });
-    
-    // 监听网络请求以捕获验证码API调用
-    let codePromise;
-    if (SMS_CONFIG.endpoint) {
-      // 如果配置了验证码接口，等待验证码
-      codePromise = fetchVerificationCode();
-    }
-    
-    await smsButton.click();
-    
-    // 获取验证码
-    let verificationCode;
-    if (SMS_CONFIG.endpoint && codePromise) {
-      console.log('[Login] 等待验证码接口返回...');
-      verificationCode = await Promise.race([
-        codePromise,
-        new Promise((_, reject) => setTimeout(() => reject(new Error('获取验证码超时')), 60000))
-      ]);
-    } else {
-      // 无接口配置时，尝试从网络请求中拦截
-      verificationCode = await interceptSmsCode(page);
-    }
-    
-    console.log('[Login] 获取到验证码:', verificationCode);
-    
-    // 输入验证码
-    const codeInput = await page.waitForSelector('input[placeholder*="验证码"]', { timeout: 5000 }) ||
-                      await page.waitForSelector('input[type="tel"]', { timeout: 3000 });
-    if (codeInput) {
-      await codeInput.click({ clickCount: 3 });
-      await codeInput.type(verificationCode, { delay: 50 });
-    }
-    await sleep(500);
-    
-    // 勾选"我已阅读并同意"
-    console.log('[Login] 勾选用户协议...');
-    try {
-      const checkbox = await page.waitForSelector('.agree-checkbox, [class*="check"], [type="checkbox"]', { timeout: 3000 });
-      if (checkbox) {
-        const isChecked = await checkbox.evaluate(el => el.checked);
-        if (!isChecked) {
-          await checkbox.click();
-        }
-      }
-    } catch (e) {
-      console.log('[Login] 未找到复选框或已默认勾选，继续');
-    }
-    
-    // 点击登录按钮
-    console.log('[Login] 点击登录按钮...');
-    const loginButton = await page.waitForSelector('button[type="submit"], text=登录, .login-btn', { timeout: 5000 });
-    await loginButton.click();
-    
-    // 等待登录成功（页面跳转或出现首页元素）
-    console.log('[Login] 等待登录完成...');
-    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {});
-    await sleep(2000);
-    
-    // 验证登录是否成功
-    const currentUrl = page.url();
-    if (currentUrl.includes('login')) {
-      throw new Error('登录失败，仍在登录页面');
-    }
-    
-    console.log('[Login] 登录成功！当前URL:', currentUrl);
-    return page;
-    
-  } catch (error) {
-    console.error('[Login] 登录过程出错:', error.message);
-    await page.screenshot({ path: '/tmp/login_error.png' }).catch(() => {});
-    throw error;
-  }
-}
-
-/**
- * 从双卡助手接口获取验证码
- */
-async function fetchVerificationCode() {
-  // 这里需要根据实际的验证码获取方式来实现
-  // 可能是通过轮询某个API，或者监听某个webhook
-  
-  // 示例：轮询方式获取最新验证码
-  const maxAttempts = 60; // 最多等60秒
-  for (let i = 0; i < maxAttempts; i++) {
-    try {
-      const response = await fetch(SMS_CONFIG.endpoint);
-      if (response.ok) {
-        const data = await response.json();
-        if (data.code) {
-          return data.code;
-        }
-      }
-    } catch (e) {
-      // 忽略错误，继续重试
-    }
-    await sleep(1000);
-  }
-  throw new Error('无法获取验证码');
-}
-
-/**
- * 通过拦截网络请求获取验证码（备用方案）
- * 从页面发出的请求中提取验证码相关信息
- */
-async function interceptSmsCode(page) {
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error('拦截验证码超时')), 60000);
-    
-    // 监听响应，寻找包含验证码的请求
-    page.on('response', async (response) => {
-      const url = response.url();
-      // 知识星球验证码相关的API通常会包含特定关键字
-      if (url.includes('sms') || url.includes('code') || url.includes('verify')) {
-        try {
-          const json = await response.json().catch(() => null);
-          if (json && json.code) {
-            clearTimeout(timeout);
-            resolve(json.code.toString());
-          }
-        } catch (e) {
-          // 忽略解析错误
-        }
-      }
-    });
-  });
-}
-
-/**
- * 工具函数：延迟指定毫秒
- * @param {number} ms 延迟时间（毫秒）
- */
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-module.exports = { login, PHONE_NUMBER };
+module.exports = { setCookie, getCookie, checkStatus };
