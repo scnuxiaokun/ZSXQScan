@@ -1,4 +1,4 @@
-/**
+q/**
  * Task 服务模块
  * 
  * 负责任务处理、文章获取等核心逻辑
@@ -161,11 +161,9 @@ async function processBatchTasks(urls) {
  * 获取待处理任务的星球URL列表（包括pending和failed状态）
  */
 async function getPendingTaskUrls() {
-  // 分别查询pending和failed状态
-  const [pendingResult, failedResult] = await Promise.all([
-    tasksCollection.where({ status: 'pending' }).field({ planetUrl: true }).get(),
-    tasksCollection.where({ status: 'failed' }).field({ planetUrl: true }).get()
-  ]);
+  // 分别查询pending和failed状态（避免共享collection实例导致条件覆盖）
+  const pendingResult = await tasksCollection.where({ status: 'pending' }).field({ planetUrl: true }).get();
+  const failedResult = await tasksCollection.where({ status: 'failed' }).field({ planetUrl: true }).get();
   
   const urlSet = new Set();
   if (pendingResult.data) {
