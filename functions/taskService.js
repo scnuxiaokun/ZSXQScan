@@ -25,9 +25,9 @@ function htmlToPlainText(html) {
     .replace(/<\/?(p|div|h[1-6]|br|li|tr)[^>]*>/gi, '\n')
     .replace(/<[^>]+>/g, '')
     .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'")
-    .replace(/[ \t]+/g, ' ').replace(/
-\s*
-    .replace(/[ \t]+/g, ' ').replace(/\n\s*\n/g, '\n\n')}
+    .replace(/[ \t]+/g, ' ').replace(/\n\s*\n/g, '\n\n')
+    .trim();
+}
 
 /**
  * 解析文章详情
