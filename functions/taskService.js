@@ -6,6 +6,7 @@
 
 const { getTopics, getTopicDetail, resolveGroupId } = require('./zsxqApi');
 const { notifyArticleCompleted } = require('./feishuNotifier');
+const { htmlToPlainText } = require('./htmlToPlainText');
 
 let tasksCollection = null;
 
@@ -16,19 +17,6 @@ function initCollections(tasks) {
   tasksCollection = tasks;
 }
 
-/**
- * HTML转纯文本
- */
-function htmlToPlainText(html) {
-  if (!html || typeof html !== 'string') return '';
-  if (!/<\/?[a-z][\s\S]*>/i.test(html)) return html.trim();
-  return html
-    .replace(/<\/?(p|div|h[1-6]|br|li|tr)[^>]*>/gi, '\n')
-    .replace(/<[^>]+>/g, '')
-    .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'")
-    .replace(/[ \t]+/g, ' ').replace(/\n\s*\n/g, '\n\n')
-    .trim();
-}
 
 /**
  * 解析文章详情
@@ -88,8 +76,15 @@ async function processTask(planetUrl) {
   const planetId = extractPlanetId(planetUrl);
 
   try {
-    const pendingResult = await tasksCollection
+    // 先查询pending状态的任务
+    let pendingResult = await tasksCollection
       .where({ planetId, status: 'pending' }).orderBy('createdAt', 'desc').limit(1).get();
+    
+    // 如果没有pending任务，则查询failed状态的任务
+    if (!pendingResult.data?.length) {
+      pendingResult = await tasksCollection
+        .where({ planetId, status: 'failed' }).orderBy('createdAt', 'desc').limit(1).get();
+    }
 
     if (!pendingResult.data?.length) {
       return { planetId, status: 'skipped', reason: 'no_pending_task' };
@@ -129,9 +124,12 @@ async function processTask(planetUrl) {
   } catch (error) {
     // 尝试标记失败
     try {
-      const pendingResult = await tasksCollection.where({ planetId, status: 'pending' }).limit(1).get();
-      if (pendingResult.data?.length) {
-        const taskId = pendingResult.data[0].id || pendingResult.data[0]._id;
+      let taskResult = await tasksCollection.where({ planetId, status: 'pending' }).limit(1).get();
+      if (!taskResult.data?.length) {
+        taskResult = await tasksCollection.where({ planetId, status: 'failed' }).limit(1).get();
+      }
+      if (taskResult.data?.length) {
+        const taskId = taskResult.data[0].id || taskResult.data[0]._id;
         await tasksCollection.doc(taskId).update({ 
           data: { 
             status: 'failed', 
@@ -160,20 +158,27 @@ async function processBatchTasks(urls) {
 }
 
 /**
- * 获取待处理任务的星球URL列表
+ * 获取待处理任务的星球URL列表（包括pending和failed状态）
  */
 async function getPendingTaskUrls() {
-  const pendingResult = await tasksCollection.where({ status: 'pending' }).field({ planetUrl: true }).get();
+  // 分别查询pending和failed状态
+  const [pendingResult, failedResult] = await Promise.all([
+    tasksCollection.where({ status: 'pending' }).field({ planetUrl: true }).get(),
+    tasksCollection.where({ status: 'failed' }).field({ planetUrl: true }).get()
+  ]);
+  
   const urlSet = new Set();
   if (pendingResult.data) {
     pendingResult.data.forEach(t => t.planetUrl && urlSet.add(t.planetUrl));
+  }
+  if (failedResult.data) {
+    failedResult.data.forEach(t => t.planetUrl && urlSet.add(t.planetUrl));
   }
   return Array.from(urlSet);
 }
 
 module.exports = {
   initCollections,
-  htmlToPlainText,
   parseArticleDetail,
   fetchArticle,
   extractPlanetId,
