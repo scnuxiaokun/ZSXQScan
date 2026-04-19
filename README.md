@@ -10,6 +10,27 @@
 - 💰 **低成本** — 腾讯云 CloudBase 免费额度即可运行
 - 🚀 **快速响应** — 单次检测 < 1 秒
 
+### 快速开始（云托管部署）⭐
+
+```bash
+# 1. 克隆代码
+git clone https://github.com/your-repo/ZSXQScan.git
+cd ZSXQScan
+
+# 2. 安装依赖
+npm install
+
+# 3. 配置环境变量
+cp .env.example .env
+# 编辑 .env 文件，填入你的配置
+
+# 4. 一键部署到腾讯云托管
+tcb login
+tcb cloudrun deploy -s zsxq-scan --source . --force
+```
+
+部署完成后，服务会自动启动定时任务，按照配置的频率执行监控和文章拉取。
+
 ## 架构
 
 ```
@@ -85,9 +106,12 @@ ZSXQScan/
 
 | 技术 | 版本 | 用途 |
 |------|------|------|
-| Node.js | 18+ | 云函数运行时 |
-| @cloudbase/node-sdk | ^2.6.0 | 云数据库操作 |
-| 腾讯云 CloudBase | - | 部署平台 + 定时触发器 |
+| Node.js | 22-alpine | Docker 容器运行时 |
+| Express | ^4.18 | HTTP 服务器框架 |
+| node-cron | ^3.0 | 定时任务调度 |
+| mysql2 | ^3.6 | MySQL 数据库驱动 |
+| @cloudbase/node-sdk | ^2.6.0 | CloudBase SDK（可选） |
+| 腾讯云 CloudBase | - | 云托管部署平台 + 定时触发器 |
 
 ## 部署指南
 
@@ -184,6 +208,77 @@ cd functions/updatedMonitor && npm install
 cd functions/loopLastUpdateArticleTask && npm install
 ```
 
+## 云托管部署（推荐）⭐
+
+项目支持通过 CloudBase CLI 一键部署到腾讯云托管服务，云端自动构建 Docker 镜像。
+
+### 前置要求
+
+1. **安装 CloudBase CLI**:
+   ```bash
+   npm install -g @cloudbase/cli
+   ```
+
+2. **登录腾讯云**:
+   ```bash
+   tcb login
+   ```
+
+3. **配置环境变量文件** (`.env`):
+   ```bash
+   # 复制模板
+   cp .env.example .env
+   
+   # 编辑 .env 文件，填入以下配置
+   TCB_ENV=temu-tools-prod-3g8yeywsda972fae
+   MONITOR_CRON=*/1 * * * *          # Monitor定时任务：每1分钟执行
+   TASK_CRON=*/5 * * * *             # Task定时任务：每5分钟执行
+   DB_HOST=sh-cynosdbmysql-grp-xxx.sql.tencentcdb.com
+   DB_PORT=22871
+   DB_USER=zsxq_scan_dbuser
+   DB_PASSWORD=your_password
+   DB_NAME=temu-tools-prod-3g8yeywsda972fae
+   ```
+
+### 部署命令
+
+```bash
+# 从当前目录上传代码到云托管，云端自动构建
+tcb cloudrun deploy -s zsxq-scan --source . --force
+```
+
+**参数说明**:
+- `-s zsxq-scan`: 云托管服务名称
+- `--source .`: 从当前目录上传代码包
+- `--force`: 强制部署，跳过确认提示
+
+### 部署流程
+
+1. **打包代码**: CLI 自动将当前目录打包为 zip 文件
+2. **上传到 COS**: 代码包上传到腾讯云对象存储
+3. **云端构建**: 使用项目中的 `Dockerfile` 在云端自动构建镜像
+4. **部署服务**: 创建新版本并自动切换流量
+
+### 查看部署状态
+
+部署完成后，CLI 会输出部署任务链接，点击即可查看实时构建进度和日志。
+
+也可以访问 [腾讯云托管控制台](https://tcb.cloud.tencent.com/) 查看服务状态。
+
+### 修改定时任务频率
+
+如需调整监控频率，修改 `.env` 文件中的 cron 表达式后重新部署：
+
+```bash
+# 示例：每30秒执行一次 Monitor
+MONITOR_CRON="*/30 * * * * *"
+
+# 示例：每10分钟执行一次 Task
+TASK_CRON="*/10 * * * *"
+```
+
+> 💡 **提示**: 云托管使用内置的 node-cron 库实现定时任务，通过环境变量灵活配置。
+
 ## 本地测试
 
 ### 快速测试（公开API）
@@ -247,6 +342,8 @@ npm test
 1. **Cookie 管理**: 仅用于获取文章全文，有效期约 1-3 个月，过期后从浏览器重新复制并通过 `login` 函数 `setCookie` 保存
 2. **频率限制**: pub-api 为公开接口，礼貌性请求即可；`api.zsxq.com` 带 Cookie 请求应保持低频
 3. **错误重试**: 失败的任务标记为 `failed`，可后续扩展重试机制
+4. **云托管部署**: 推荐使用 CloudBase CLI 的 `tcb cloudrun deploy` 命令部署，云端自动构建 Docker 镜像
+5. **定时任务配置**: 通过 `.env` 文件中的 `MONITOR_CRON` 和 `TASK_CRON` 环境变量调整执行频率
 
 ## 详细文档
 
