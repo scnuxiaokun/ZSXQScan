@@ -448,7 +448,7 @@ app.get('/api/article', async (req, res) => {
 // ==================== 定时任务 ====================
 
 const MONITOR_CRON = process.env.MONITOR_CRON || '*/5 * * * *';  // 默认每5分钟
-const TASK_CRON = process.env.TASK_CRON || '*/10 * * * *';       // 默认每10分钟
+const TASK_CRON = process.env.TASK_CRON || '*/5 * * * *';       // 默认每10分钟
 
 console.log(`[Server] 定时任务配置: Monitor=${MONITOR_CRON}, Task=${TASK_CRON}`);
 
