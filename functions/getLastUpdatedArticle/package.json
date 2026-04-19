@@ -1,1 +1,0 @@
-{"name": "getLastUpdatedArticle", "version": "1.0.0", "description": "文章获取 — 通过私有API获取星球最新文章全文", "main": "index.js", "dependencies": {"@cloudbase/node-sdk": "^2.6.0"}, "engines": {"node": ">=16.0.0"}}

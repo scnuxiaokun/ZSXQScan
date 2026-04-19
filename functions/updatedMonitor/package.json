@@ -1,1 +1,0 @@
-{"name": "updatedMonitor", "version": "1.0.0", "description": "星球更新监控 — 公开接口检测 + 定时触发", "main": "index.js", "dependencies": {"@cloudbase/node-sdk": "^2.6.0"}, "engines": {"node": ">=16.0.0"}}
