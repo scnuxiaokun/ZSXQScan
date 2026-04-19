@@ -51,6 +51,7 @@ const { getGroupPublicInfo, resolveGroupId, formatRelativeTime } = require('./fu
 const { getTopicDetail, getTopics } = require('./functions/zsxqApi');
 const { saveCookie, getValidCookie, checkCookieStatus } = require('./functions/cookieManager');
 const { validateCookie } = require('./functions/zsxqApi');
+const { notifyPlanetUpdate, notifyTaskResult } = require('./functions/feishuNotifier');
 
 // 注入已初始化的集合到 CookieManager，避免重复初始化连接
 try {
@@ -169,7 +170,7 @@ function htmlToPlainText(html) {
     .replace(/<\/?(p|div|h[1-6]|br|li|tr)[^>]*>/gi, '\n')
     .replace(/<[^>]+>/g, '')
     .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'")
-    .replace(/[ \t]+/g, ' ').replace(/\n\s*\n\s*/g, '\n\n')
+    .replace(/[ \t]+/g, ' ').replace(/\n\s*\n/g, '\n\n')
     .trim();
 }
 
@@ -365,7 +366,12 @@ app.post('/api/monitor', async (req, res) => {
 
     const results = [];
     for (let i = 0; i < urls.length; i++) {
-      results.push(await runMonitor(urls[i]));
+      const result = await runMonitor(urls[i]);
+      results.push(result);
+      // 发送飞书通知
+      if (result.hasUpdate) {
+        notifyPlanetUpdate(result).catch(e => console.error('[Feishu] 通知失败:', e.message));
+      }
       if (i < urls.length - 1) await new Promise(r => setTimeout(r, 200 + Math.random() * 300));
     }
 
@@ -392,7 +398,8 @@ app.post('/api/task', async (req, res) => {
 
     const results = [];
     for (const url of urls) {
-      results.push(await processTask(url));
+      // 发送飞书通知
+      notifyTaskResult(result).catch(e => console.error('[Feishu] 通知失败:', e.message));      results.push(await processTask(url));
       await new Promise(r => setTimeout(r, 800 + Math.random() * 1200));
     }
 
