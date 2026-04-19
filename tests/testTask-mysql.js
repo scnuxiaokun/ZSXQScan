@@ -11,6 +11,7 @@ require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') }
 
 const mysql = require('mysql2/promise');
 const { getLatestArticle } = require('../functions/getLastUpdatedArticle');
+const { getGroupPublicInfo } = require('../functions/zsxqApi');
 
 // ==================== MySQL 配置 ====================
 const dbConfig = {
@@ -61,14 +62,14 @@ async function getPendingTask(planetId) {
 /**
  * 创建新任务
  */
-async function createTask(planetId, planetUrl, topicCreateTime) {
+async function createTask(planetId, planetUrl, topicCreateTime, planetName) {
   const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
   const now = new Date().toISOString();
   
   await conn.query(
     `INSERT INTO \`tasks\` (\`id\`, \`planetId\`, \`planetName\`, \`planetUrl\`, \`status\`, \`topicCreateTime\`, \`createdAt\`, \`updatedAt\`) 
      VALUES (?, ?, ?, ?, 'pending', ?, NOW(), NOW())`,
-    [id, planetId, `测试星球-${planetId}`, planetUrl, topicCreateTime || null]
+    [id, planetId, planetName || `星球-${planetId}`, planetUrl, topicCreateTime || null]
   );
   
   console.log(`[MySQL] ✅ 创建任务: ${id}`);
@@ -170,9 +171,22 @@ async function main() {
   try {
     const planetUrl = `https://wx.zsxq.com/group/${TEST_GROUP_ID}`;
 
+    // 步骤0：获取星球名称
+    console.log('🌍 步骤0: 获取星球信息...');
+    let planetName = `星球-${TEST_GROUP_ID}`;
+    try {
+      const info = await getGroupPublicInfo(TEST_GROUP_ID);
+      if (info.resp_data?.group?.name) {
+        planetName = info.resp_data.group.name;
+        console.log(`   星球名称: ${planetName}\n`);
+      }
+    } catch (e) {
+      console.log(`   ⚠️ 无法获取星球名称，使用默认值\n`);
+    }
+
     // 步骤1：创建测试任务
     console.log('📝 步骤1: 创建测试任务...');
-    const task = await createTask(TEST_GROUP_ID, planetUrl, null);
+    const task = await createTask(TEST_GROUP_ID, planetUrl, null, planetName);
     console.log('');
 
     // 步骤2：获取最新文章

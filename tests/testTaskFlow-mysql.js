@@ -66,13 +66,13 @@ async function getPendingTask(planetId) {
 /**
  * 创建新任务
  */
-async function createTask(planetId, planetUrl, topicCreateTime) {
+async function createTask(planetId, planetUrl, topicCreateTime, planetName) {
   const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
   
   await conn.query(
     `INSERT INTO \`tasks\` (\`id\`, \`planetId\`, \`planetName\`, \`planetUrl\`, \`status\`, \`topicCreateTime\`, \`createdAt\`, \`updatedAt\`) 
      VALUES (?, ?, ?, ?, 'pending', ?, NOW(), NOW())`,
-    [id, planetId, `测试星球-${planetId}`, planetUrl, topicCreateTime || null]
+    [id, planetId, planetName || `星球-${planetId}`, planetUrl, topicCreateTime || null]
   );
   
   console.log(`  [MySQL] ✅ 创建任务: ${id}`);
@@ -158,7 +158,7 @@ async function stage1_Monitor(groupId) {
     
     // 创建新任务
     const planetUrl = `https://wx.zsxq.com/group/${groupId}`;
-    const task = await createTask(groupId, planetUrl, latestTopicTime);
+    const task = await createTask(groupId, planetUrl, latestTopicTime, g.name);
     
     console.log(`  ✅ Monitor完成，任务已创建\n`);
     return task;
@@ -351,6 +351,10 @@ async function main() {
   }
   
   console.log('✅ Cookie 已从数据库加载\n');
+  
+  // 将 Cookie 设置到环境变量中，供 zsxqApi 使用
+  process.env.ZSXQ_COOKIE = cookie;
+  console.log(`💡 Cookie 已设置到环境变量\n`);
   console.log(`[Test] 测试星球数: ${TEST_GROUP_IDS.length}\n`);
 
   try {
@@ -405,10 +409,10 @@ async function main() {
     console.log(`  📊 最终任务统计: 总计=${finalStats.total}, 待处理=${finalStats.pending}, 已完成=${finalStats.completed}`);
     console.log('');
 
-    // 清理测试数据
+    // 清理测试数据（已禁用）
     console.log('🧹 清理测试数据...');
-    await cleanupTestTasks(TEST_GROUP_IDS);
-    console.log('');
+    // await cleanupTestTasks(TEST_GROUP_IDS);
+    console.log('ℹ️  跳过清理，数据已保留\n');
 
     console.log('🎉 所有测试完成！\n');
 
@@ -421,9 +425,9 @@ async function main() {
       console.error('   → 用户名或密码错误');
     }
 
-    // 尝试清理
+    // 尝试清理（已禁用）
     try {
-      await cleanupTestTasks(TEST_GROUP_IDS);
+      // await cleanupTestTasks(TEST_GROUP_IDS);
     } catch (e) {
       console.error('清理失败:', e.message);
     }

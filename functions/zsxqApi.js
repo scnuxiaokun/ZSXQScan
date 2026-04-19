@@ -58,7 +58,7 @@ const SAFETY_CONFIG = {
   maxRandomJitter: 3000,
   
   /** 同一星球的最小检测间隔(s) — 即使定时器触发了也跳过 */
-  perGroupMinInterval: 120,  // 2分钟
+  perGroupMinInterval: 30,  // 30秒
   
   /** 全局每分钟最大请求数 */
   globalMaxRequestsPerMinute: 30,
@@ -279,13 +279,12 @@ const tokenValidityCache = {
 /**
  * 检测 Access Token 是否有效（已过期/无效）
  * 
- * 通过调用 /v2/user 接口来验证 token：
- * - 200 + 正常返回 → 有效 ✅
- * - 401 / 403 → 无效/已过期 ❌
+ * 🆕 简化策略: 不再主动验证 token，直接请求业务接口
+ * 如果业务接口返回 401/403，则判定为 token 失效
  * 
  * @param {string} accessToken 要检测的 access token
- * @param {string} [cookie] 完整的 cookie 字符串（用于构造请求头）
- * @returns {Promise<{valid: boolean, reason?: string, statusCode?: number}>}
+ * @param {string} [cookie] 完整的 cookie 字符串
+ * @returns {Promise<{valid: boolean, reason?: string}>}
  */
 async function validateAccessToken(accessToken, cookie) {
   // 无 token 直接判无效
@@ -300,47 +299,12 @@ async function validateAccessToken(accessToken, cookie) {
     return { valid: cached, reason: cached ? '缓存命中' : '缓存显示无效' };
   }
 
-  // 用轻量接口 /v2/user 验证
-  // 注意：这里必须通过 request() 发请求（而非直接 fetch），因为本地 Node.js 原生 fetch 有超时问题
-  // skipTokenCheck=true 避免递归调用 validateAccessToken
-  try {
-    const result = await request('GET', '/v2/user', {
-      cookie,
-      retry: 0,
-      skipRateLimit: true,
-      skipTokenCheck: true,   // 避免递归
-    });
-
-    // request() 返回正常数据 → token 有效
-    if (result._needAuth) {
-      // 匿名模式标记 → 说明认证失败
-      tokenValidityCache.set(accessToken, false);
-      console.warn(`[ZSXQ-Token] ❌ Token 无效 (需要认证)`);
-      return { valid: false, reason: 'Token 无效，接口返回需要认证' };
-    }
-
-    if (result._authExpired) {
-      // 不会发生（skipTokenCheck=true 跳过了检测），但防御性处理
-      tokenValidityCache.set(accessToken, false);
-      return { valid: false, reason: result._authReason || 'Token 已失效' };
-    }
-
-    // 正常返回 → 有效
-    tokenValidityCache.set(accessToken, true);
-    console.log(`[ZSXQ-Token] ✅ Token 有效`);
-    return { valid: true };
-
-  } catch (error) {
-    // 401/403 → token 无效
-    if (error.message.includes('401') || error.message.includes('403') || error.message.includes('过期')) {
-      tokenValidityCache.set(accessToken, false);
-      console.warn(`[ZSXQ-Token] ❌ Token 已过期或无效: ${error.message.substring(0, 80)}`);
-      return { valid: false, reason: error.message.substring(0, 100) };
-    }
-    // 网络错误不判定为 token 失效
-    console.warn(`[ZSXQ-Token] ⚠️ 验证网络异常: ${error.message.substring(0, 80)}，默认认为有效`);
-    return { valid: true, reason: '网络异常，默认认为有效' };
-  }
+  // 🆕 不再主动调用 /v2/user 验证，直接认为有效
+  // 真正的验证会在实际业务请求时进行（如 getTopics、getTopicDetail）
+  // 如果那些接口返回 401/403，会更新缓存并提示重新登录
+  console.log(`[ZSXQ-Token] ✅ Token 格式有效 (跳过主动验证)`);
+  tokenValidityCache.set(accessToken, true);
+  return { valid: true, reason: '格式有效，待业务请求验证' };
 }
 
 // ==================== 请求封装 ====================

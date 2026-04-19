@@ -57,24 +57,10 @@ try {
   const cm = require('./functions/cookieManager');
   // 如果支持注入则注入
   if (cm.injectCollection) {
-    cm.injectCollection(configCollection, 'mysql');
+    cm.injectCollection(configCollection, hasMySQL ? 'mysql' : (hasCloudEnv ? 'cloud' : 'local'));
     console.log(`[Server] 已向 CookieManager 注入集合实例`);
   }
-
-// 从数据库加载 Cookie 并设置到环境变量
-(async () => {
-  try {
-    const cookieDoc = await configCollection.doc('zsxq_cookie').get();
-    if (cookieDoc.data?.value) {
-      process.env.ZSXQ_COOKIE = cookieDoc.data.value;
-      console.log('[Server] ✅ Cookie 已从数据库加载到环境变量');
-    } else {
-      console.warn('[Server] ⚠️  数据库中未找到 Cookie 配置');
-    }
-  } catch(e) {
-    console.error('[Server] ❌ 加载 Cookie 失败:', e.message);
-  }
-})();} catch(e) {}
+} catch(e) {}
 
 // ==================== Monitor 核心逻辑 ====================
 
@@ -174,8 +160,8 @@ function htmlToPlainText(html) {
 }
 
 function parseArticleDetail(apiResponse, topicId) {
-  const topic = apiResponse.resp_data?.topic || apiResponse.topic || apiResponse.data || apiResponse;
-  let content = topic.text ? htmlToPlainText(topic.text) : (topic.talk?.text || topic.text_summary || '');
+  const topic = apiResponse.topic || apiResponse.data || apiResponse;
+  let content = topic.text ? htmlToPlainText(topic.text) : (topic.text_summary || '');
   let title = topic.title || topic.subject || '';
   if (!title && content) title = content.split('\n')[0].trim().substring(0, 80);
 
@@ -198,13 +184,10 @@ async function fetchArticle(planetUrl, topicId) {
   if (!targetTopicId) {
     const groupId = resolveGroupId(planetUrl);
     const topicsResult = await getTopics(groupId, { count: 1 });
-    // 处理不同的响应结构
-    const topics = topicsResult.resp_data?.topics || topicsResult.topics || topicsResult.data;
-    const latest = Array.isArray(topics) ? topics[0] : null;
-    // topic_uid 是字符串ID，topic_id 是数字ID
-    const topicId = latest?.topic_uid || latest?.id || latest?.topic_id;
-    if (!topicId) throw new Error('未能获取到最新话题ID');
-    targetTopicId = topicId;  }
+    const latest = topicsResult.topics?.[0] || topicsResult.data?.[0];
+    if (!latest?.id) throw new Error('未能获取到最新话题ID');
+    targetTopicId = latest.id;
+  }
 
   const detail = await getTopicDetail(targetTopicId);
   return parseArticleDetail(detail, targetTopicId);
@@ -228,10 +211,9 @@ async function processTask(planetUrl) {
     }
 
     const task = pendingResult.data[0];
-    // MySQL 模式下主键是 id，CloudBase 模式下是 _id
-    const taskId = task.id || task._id;    const articleData = task.topicId ? await fetchArticle(planetUrl, task.topicId) : await fetchArticle(planetUrl);
+    const articleData = task.topicId ? await fetchArticle(planetUrl, task.topicId) : await fetchArticle(planetUrl);
 
-    await tasksCollection.doc(taskId).update({
+    await tasksCollection.doc(task._id).update({
       data: { status: 'completed', article: JSON.stringify(articleData), articleTitle: articleData.title,
               articleLength: articleData.content.length, topicId: articleData.topicId, topicType: articleData.type,
               updatedAt: new Date() },
