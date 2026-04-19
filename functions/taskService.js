@@ -5,6 +5,7 @@
  */
 
 const { getTopics, getTopicDetail, resolveGroupId } = require('./zsxqApi');
+const { notifyArticleCompleted } = require('./feishuNotifier');
 
 let tasksCollection = null;
 
@@ -110,6 +111,12 @@ async function processTask(planetUrl) {
         updatedAt: new Date() 
       },
     });
+
+    // 发送飞书通知（异步，不阻塞返回）
+    notifyArticleCompleted(
+      { planetId, status: 'success', taskId, articleTitle: articleData.title },
+      articleData
+    ).catch(e => console.error('[Feishu] 通知失败:', e.message));
 
     return { 
       planetId, 
