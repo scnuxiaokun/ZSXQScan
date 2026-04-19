@@ -5,6 +5,7 @@
  */
 
 const https = require('https');
+const { rewriteArticle } = require('./hunyuanRewriter');
 
 // 飞书 Webhook URL（从环境变量读取，或使用默认值）
 const FEISHU_WEBHOOK_URL = process.env.FEISHU_WEBHOOK_URL || 
@@ -133,6 +134,11 @@ async function notifyArticleCompleted(taskResult, articleData) {
   const textContent = extractTextContent(articleData);
   if (!textContent) return;
 
+  // 使用混元大模型进行洗稿
+  console.log('[Feishu] 开始洗稿...');
+  const rewrittenContent = await rewriteArticle(textContent);
+  console.log('[Feishu] 洗稿完成');
+
   const title = `📝 新文章提醒`;
   
   // 构建通知头部
@@ -143,8 +149,8 @@ async function notifyArticleCompleted(taskResult, articleData) {
   const maxMessageLength = maxContentLength - header.length;
   
   // 如果内容不超过限制，直接发送
-  if (textContent.length <= maxMessageLength) {
-    const content = header + textContent;
+  if (rewrittenContent.length <= maxMessageLength) {
+    const content = header + rewrittenContent;
     try {
       await sendFeishuNotification({ title, content });
     } catch (e) {
@@ -155,7 +161,7 @@ async function notifyArticleCompleted(taskResult, articleData) {
   
   // 内容过长，切分为多条消息
   const chunks = [];
-  let remaining = textContent;
+  let remaining = rewrittenContent;
   let chunkIndex = 1;
   
   while (remaining.length > 0) {
