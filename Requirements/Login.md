@@ -67,9 +67,9 @@ zsxq_access_token=eyJhbGciOiJIUzI1NiIs...; zsxqsessionid=abc123def456; ...
 
 ## API 接口说明
 
-### 入口: `exports.main(event, context)`
+### 入口: Express API `/api/login`
 
-通过 `event.action` 区分操作：
+通过 `event.action` 或 `req.body.action` 区分操作：
 
 | action | 功能 | 参数 | 说明 |
 |--------|------|------|------|
@@ -100,9 +100,9 @@ zsxq_access_token=eyJhbGciOiJIUzI1NiIs...; zsxqsessionid=abc123def456; ...
 
 ```
 ┌─────────────────────────────┐
-│  ZSXQ_COOKIE (环境变量)       │ ← 最高优先级，CloudBase控制台设置
+│  ZSXQ_COOKIE (环境变量)       │ ← 最高优先级（可选）
 ├─────────────────────────────┤
-│  config.zsxq_cookie (数据库)  │ ← 通过 setCookie 写入
+│  config.zsxq_cookie (数据库)  │ ← 通过 /api/login setCookie 写入
 └─────────────────────────────┘
 ```
 
@@ -151,9 +151,11 @@ zsxq_access_token=eyJhbGciOiJIUzI1NiIs...; zsxqsessionid=abc123def456; ...
 
 | 变量名 | 必填 | 说明 |
 |--------|:----:|------|
-| `ZSXQ_COOKIE` | ⚠️ 二选一 | 手动设置的 Cookie（控制台直接配置） |
-| `TCB_ENV` | ✅ 是 | 云开发环境ID |
-| `LOGIN_PHONE` | ❌ | 登录手机号（备用信息） |
+| `ZSXQ_COOKIE` | ⚠️ 二选一 | 手动设置的 Cookie（可选） |
+| `DB_HOST` | ✅ 是 | MySQL 数据库地址 |
+| `DB_USER` | ✅ 是 | 数据库用户名 |
+| `DB_PASSWORD` | ✅ 是 | 数据库密码 |
+| `DB_NAME` | ✅ 是 | 数据库名称 |
 
 ---
 
@@ -167,15 +169,14 @@ zsxq_access_token=eyJhbGciOiJIUzI1NiIs...; zsxqsessionid=abc123def456; ...
 
 ---
 
-## 首次部署步骤
+## 首次配置步骤
 
 ```
-1. 部署所有云函数到 CloudBase
-2. 在控制台设置 TCB_ENV 环境变量
-3. 从浏览器获取 Cookie（见上方步骤一）
-4. 调用 login 函数 { action: "setCookie", cookie: "..." }
-5. 验证: 调用 { action: "checkStatus" } 确认 valid=true
-6. 配置 monitorUrls → 启动定时触发器
+1. 启动服务（本地或云托管）
+2. 从浏览器获取 Cookie（见上方步骤一）
+3. 调用 /api/login 接口 { action: "setCookie", cookie: "..." }
+4. 验证: 调用 { action: "checkStatus" } 确认 valid=true
+5. 在 config 表配置 monitorUrls → 启动定时任务
 ```
 
 ---

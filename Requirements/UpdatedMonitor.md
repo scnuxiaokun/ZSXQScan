@@ -2,11 +2,11 @@
 
 ## 概述
 
-云函数定时主入口。通过**公开 API 接口**检测星球是否有新文章更新。
+定时监控任务。通过**公开 API 接口**检测星球是否有新文章更新。
 
 - 调用 `pub-api.zsxq.com/v2/groups/{groupId}` — 无需任何认证，付费/免费星球均可
 - 返回 `topicCreateTime`（精确到毫秒的 ISO 时间戳）
-- 检测到 `topicCreateTime` 变化（新帖） → 创建拉取任务到 `tasks` 集合
+- 检测到 `topicCreateTime` 变化（新帖） → 创建拉取任务到 `tasks` 表
 
 ## 为什么可以完全不用登录？
 
